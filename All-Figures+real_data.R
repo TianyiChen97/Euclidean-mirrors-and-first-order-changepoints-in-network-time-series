@@ -1,5 +1,6 @@
-## these code are used to generate data for plotting figure 2 and 3 the only two new functions comapred to simulation.R are true_distance and true_CMDS
+## This code include how we generate the data in figure_data.Rdata and how we plot the figures based on that data.
 
+# First part: these code are used to generate data for plotting figure 2 and 3 (note:the only two new functions comapred to simulation.R are true_distance and true_CMDS)
 library(segmented)
 library(igraph)
 library(irlba)
@@ -303,7 +304,7 @@ df_true_change=true_cmds(tmax,tstar,p,q,3)
 
 
                                
-##Please load the figure_data, although the above code can generate mds_change/nochange and df_true_change/nochange, the real data and the numerical experiment result is not included.  
+##Second part: load the figure_data, although the above code can generate mds_change/nochange and df_true_change/nochange, the real data(only data is avaliable, the raw data is private) and the numerical experiment result(generated from simulation.R) is not included.  
 load("~/Figure_data.RData")
 
 pacman::p_load(tidyverse)
