@@ -1,5 +1,309 @@
-#setwd("~/Dropbox/Mirror/Paper/Tianyi")
+## these code are used to generate data for plotting figure 2 and 3 the only two new functions comapred to simulation.R are true_distance and true_CMDS
 
+library(segmented)
+library(igraph)
+library(irlba)
+library(locfit)
+library(dplyr)
+library(ggplot2)
+library(plyr)
+library(doParallel)
+library(foreach)
+library(broom)
+library(vegan)
+library(ggrepel)
+library(tidyr)
+library(tidyverse)
+library(lattice)
+library(Matrix)
+library("corrplot")
+
+rdpg.sample <- function(X, rdpg_scale=FALSE) {
+  P <- X %*% t(X)
+  if (rdpg_scale) {
+    P <- scales::rescale(P)
+  }
+  n <-  nrow(P)
+  U <- matrix(0, nrow = n, ncol = n)
+  U[col(U) > row(U)] <- runif(n*(n-1)/2)
+  U <- (U + t(U))
+  diag(U) <- runif(n)
+  A <- (U < P) + 0 ;
+  diag(A) <- 0
+  return(graph.adjacency(A,"undirected"))
+}
+full.ase <- function(A, d, diagaug=TRUE, doptr=FALSE) {
+  #    require(irlba)
+  
+  # doptr
+  if (doptr) {
+    g <- ptr(A)
+    A <- g[]
+  } else {
+    A <- A[]
+  }
+  
+  # diagaug
+  if (diagaug) {
+    diag(A) <- rowSums(A) / (nrow(A)-1)
+  }
+  
+  A.svd <- irlba(A,d)
+  Xhat <- A.svd$u %*% diag(sqrt(A.svd$d))
+  Xhat.R <- NULL
+  
+  if (!isSymmetric(A)) {
+    Xhat.R <- A.svd$v %*% diag(sqrt(A.svd$d))
+  }
+  
+  return(list(eval=A.svd$d, Xhat=Matrix(Xhat), Xhat.R=Xhat.R))
+}
+doSim <- function(n=300, tmax=40, delta=0.1, p=0.4, q=0.9, tstar=20)
+{    
+  glist <- NULL
+  Xlist <- NULL
+  Xt <- matrix(0,n,(tmax+1))
+  
+  for (t in 2:(tstar+1)) {
+    tmp <- runif(n) < p
+    Xt[,t] <- Xt[,t] + Xt[,t-1]
+    Xt[tmp,t] <- Xt[tmp,t] + delta
+  }
+  
+  for (t in (tstar+2):(tmax+1)) {
+    tmp <- runif(n) < q
+    Xt[,t] <- Xt[,t] + Xt[,t-1]
+    Xt[tmp,t] <- Xt[tmp,t] + delta
+  }
+  Xt <- Xt[,-1]
+  Xt <- Xt+0.1
+  
+  df <- tibble(time=1:tmax) %>%
+    mutate(Xt = map(time, function(x) matrix(Xt[,x],n,1)  )) %>%
+    mutate(g = map(Xt, ~rdpg.sample(.)))
+  
+  df
+}
+
+procrustes2 <- function(X, Y) {
+  tmp <- t(X) %*% Y
+  tmp.svd <- svd(tmp)
+  W <- tmp.svd$u %*% t(tmp.svd$v)
+  newX <- X %*% W
+  return(list(newX = newX, error = norm(newX-Y, type="F"), W = W))
+}
+getD <- function(Xlist, k=0, etype="proc") {
+  if (k==0) {
+    ind <- 1:n
+  } else {
+    ind <- which(Yhat==k)
+  }
+  comb <- combn(m,2)
+  Dout <- foreach (k = 1:ncol(comb), .combine='rbind') %dopar% {
+    i <- comb[1,k]
+    j <- comb[2,k]
+    #cat("i = ", i, ", j = ", j, "\n")
+    
+    if (etype == "proc") {
+      Xhati <- Xlist[[i]][ind,] # 32277 x Khat
+      Xhatj <- Xlist[[j]][ind,]
+      proc <- procrustes2(as.matrix(Xhati), as.matrix(Xhatj))
+      Xhati <- Xhati %*% proc$W
+    } else {
+      Xhati <- Xlist[[i]][ind,] # 32277 x Khat
+      Xhatj <- Xlist[[j]][ind,]
+    }
+    
+    D <- norm(Xhati - Xhatj, type="2")^2/n
+    tibble(i=i, j=j, D=D)
+  }
+  D2 <- matrix(0,m,m)
+  D2[t(comb)] <- Dout$D
+  D2 <- (D2 + t(D2)) / 1
+  #as.dist(D2)
+  D2 <- sqrt(D2)
+  D2
+}
+doMDS <- function(D, doplot=TRUE)
+{
+  mds <- cmdscale(D, m-1)
+  df.mds <- tibble(ind=1:tmax, time=sprintf("%2d",1:tmax), x=mds[,1], y=mds[,2], z=mds[,3], w=mds[,4])
+  
+  if (doplot) {
+    plot(apply(mds,2,sd), type="b", main="", xlab="dimension", ylab="column stdev")
+    
+    p1 <- df.mds %>% ggplot(aes(x=ind, y=x, color=time, group=1)) +
+      geom_point(size=3) + geom_line() +
+      geom_vline(xintercept = tstar, linetype="dashed") +
+      theme(legend.position = "none") + labs(x="time",y="mds1") #+
+    print(p1)
+    
+    p1 <- df.mds %>% ggplot(aes(x=ind, y=y, color=time, group=1)) +
+      geom_point(size=3) + geom_line() +
+      geom_vline(xintercept = tstar, linetype="dashed") +
+      theme(legend.position = "none") + labs(x="time",y="mds2") #+
+    print(p1)
+    
+    p1 <- df.mds %>% ggplot(aes(x=ind, y=z, color=time, group=1)) +
+      geom_point(size=3) + geom_line() +
+      geom_vline(xintercept = tstar, linetype="dashed") +
+      theme(legend.position = "none") + labs(x="time",y="mds3") #+
+    print(p1)
+    
+    p2 <- df.mds %>% ggplot(aes(x=x, y=y, color=time)) +
+      geom_point(size=3) +
+      geom_label_repel(aes(label=time), size=2) +
+      theme(legend.position = "none") + labs(x="mds1",y="mds2") #+
+    print(p2)
+  }
+  
+  return(list(mds=mds, df.mds=df.mds))
+}    
+doIso <- function(mds, mdsd=2, isod=1, doplot=F)
+{    
+  df.iso <- NULL
+  dis <- vegdist(mds[,1:mdsd,drop=F], "euclidean")
+  knn <- 1
+  success <- FALSE
+  while(!success) {
+    tryCatch({
+      iso = isomap(dis, k=knn, ndim=isod, path="shortest")$points
+      success <- TRUE
+    },
+    error = function(e) {
+      knn <<- knn + 1
+    })
+  }
+  iso2 <- tibble(iso=iso[,1]) %>% mutate(i=1:nrow(mds), ind=df.mds$ind, time=df.mds$time, knn=knn)
+  df.iso <- rbind(df.iso, cbind(iso2, mdsd=mdsd))
+  df.iso <- df.iso %>% group_by(mdsd) %>% mutate(iso = if(iso[1] > 0) {-iso} else {iso}) %>% ungroup()
+  
+  if (doplot) {
+    p <- df.iso %>% filter(mdsd==mdsd) %>%
+      ggplot(aes(x=ind, y=iso, color=time, group=1)) +
+      geom_point(size=3) + geom_line() +
+      theme(legend.position = "none") +
+      labs(x="time", y="isomap embedding") +
+      # scale_x_date(breaks = scales::breaks_pretty(8), labels=label_date_short()) +
+      theme(axis.text.x=element_text(hjust=0.7))
+    # theme(axis.text.x = element_text(size = 12, angle = 90, vjust = 0.3),
+    #       axis.text.y = element_text(size = 12),
+    #       axis.title = element_text(size = 14, face="bold"))
+    #    p <- p + scale_x_date(breaks = scales::breaks_pretty(8), labels=label_date_short())
+    print(p)
+    
+    df.isok <- df.iso %>% filter(mdsd==mdsd) #%>% mutate(date2 = format(ymd(paste0(date,"-01")),"%m/%y"))
+    row.names(df.isok) <- df.isok$time
+    fit <- lm(iso ~ i, data=df.isok)
+    # print(tidy(fit))
+    # print(glance(fit))
+    myfor <- augment(fit)
+    myfor2 <- myfor %>% mutate(date=.rownames, 
+                               ranks = rank(.sigma),                                       
+                               mycol=sprintf("%2d",rank(.fitted)))
+    p <- myfor2 %>%
+      ggplot(aes(.fitted, .resid)) +
+      geom_point(aes(color=mycol)) + 
+      geom_hline(yintercept = 0, linetype="dashed", color="grey") +
+      geom_smooth(method="loess", se=FALSE) +
+      labs(x="Fitted Values", y="Residuals") +
+      theme(legend.position = "none",
+            axis.title = element_text(size=14, face="bold"))
+    p <- p + geom_label_repel(aes(label=date), data=myfor2 %>% filter(ranks %in% 1:3))
+    print(p)
+  }
+  
+  return(df.iso)
+}
+
+## true dmv distance
+true_distance=function(m,p){
+  return( (m*(m-1)*p^2+m*p)*delta^2 )
+}
+
+##CMDS on the true distance matrix for model with change point                  
+true_cmds=function(tt,t0,p,q,cdim){
+  
+  D=matrix(0,tt,tt)
+  for (i in 1:t0) {
+    for (j in (i):t0) {
+      D[i,j]=sqrt(true_distance(abs(i-j),p))
+    }
+  }
+  
+  for (i in t0:tt) {
+    for (j in (i):tt) {
+      D[i,j]=sqrt(true_distance(abs(i-j),q))
+    }
+  }
+  
+  for (i in 1:(t0-1)) {
+    for (j in (t0+1):tt) {
+      m=t0-i
+      n=j-t0
+      D[i,j]=sqrt(true_distance(m,p)+true_distance(n,q)+2*m*n*p*q*delta^2)
+    }
+  }
+  
+  D=D+t(D)
+  D2=D^2
+  
+  P=diag(rep(1,tt))-rep(1,tt)%*%t(rep(1,tt))/tt
+  B=(-1/(2))*P%*%D2%*%P
+  
+  svdb= irlba(B,cdim)
+  df_true=as.data.frame(svdb$u[,1:cdim]%*%sqrt(diag(svdb$d[1:cdim])))
+  
+  if(df_true$V1[1]>0){
+    df_true$V1=-df_true$V1
+  }
+  
+  df_true
+}
+
+
+pacman::p_load("doParallel")
+registerDoParallel(detectCores()-1)
+
+## mds_nochange and df_true_nochange generation
+set.seed(2)
+n=1500
+tmax <- m <- 40
+p <- q <- 0.4
+delta <- (1-0.1)/tmax
+tstar <- 20
+
+df <- doSim(n,tmax,delta,p,q,tstar)
+Dhat <- getD(df$Xt) 
+df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x,2)$Xhat[,1,drop=F]))
+D2 <- getD(df$Xhat) 
+df.mds <- doMDS(D2,doplot = F)
+mds_nochange <- df.mds$mds
+df_true_nochange=true_cmds(tmax,tstar,p,q,3)
+
+
+#mds_change and df_true_change generation
+set.seed(2)
+n=1500
+tmax <- m <- 40
+p <- 0.4
+q <- 0.2
+delta <- (1-0.1)/tmax
+tstar <- 20
+
+df <- doSim(n,tmax,delta,p,q,tstar)
+Dhat <- getD(df$Xt) 
+df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x,2)$Xhat[,1,drop=F]))
+D2 <- getD(df$Xhat) 
+df.mds <- doMDS(D2,doplot = F)
+mds_change <- df.mds$mds
+df_true_change=true_cmds(tmax,tstar,p,q,3)
+## code above are used to generate mds_change/nochange and df_true_change/nochange data, if you just want to replicates the data, you can only use code below 
+
+
+
+                               
+##Please load the figure_data, although the above code can generate mds_change/nochange and df_true_change/nochange, the real data and the numerical experiment result is not included.  
 load("~/Figure_data.RData")
 
 pacman::p_load(tidyverse)
