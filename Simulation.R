@@ -393,7 +393,7 @@ plottt1<- ggplot(sm_mse_change_n, aes(x=V4, y=V2)) +
   geom_line() +geom_errorbar(aes(ymin=V1, ymax=V3))+
   ylim(0,0.0115)+
   scale_x_continuous(breaks = nn)+
-  labs(y='relative MSE',x='n')+
+  labs(y='MSE',x='n')+
   theme(axis.text=element_text(size=25),axis.title=element_text(size=25,face="bold"))
 print(plottt1)
 
