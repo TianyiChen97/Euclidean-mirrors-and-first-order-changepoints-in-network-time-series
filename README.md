@@ -9,5 +9,5 @@ Data including the simulation results and the real data. We make our numerical e
 
 ## Code
 `Simulation.R` includes all the code needed to reproduce the numerical experiment for localization performance result "sm_mse_...".
-Then `Simulation-Figures.R` includes the code to plot the simulation results figures using "sm_mse_..."s. Also it includes the code we need to reproduce the figs 2 3 4 7 (simulation for Model with changepoint or without changepoint and the real data example). 
+Then `Simulation-Figures.R` includes the code to plot the simulation results figures using "sm_mse_..."s. Also it includes the code we need to reproduce the figs 2 3 4 (simulation for Model with changepoint or without changepoint). 
 Then `Real data-Figures.R` includes the codes that read in the TSG with 44 nodes and 30 time points directed graphs and then perform summary statistics analysis, Frobenius norm control chart analysis and isomirror analysis.  
