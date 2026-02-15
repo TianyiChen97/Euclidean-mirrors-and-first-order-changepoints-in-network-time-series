@@ -1,7 +1,10 @@
 pacman::p_load(segmented, igraph, irlba, locfit, tidyverse, doParallel, broom, vegan, Matrix)
-
-registerDoParallel(detectCores()-1)
-
+library(future)
+library(future.apply)
+library(progressr)
+library(dplyr)
+library(purrr)
+library(igraph)
 ##generate RDPG from given latent position X
 rdpg.sample <- function(X, rdpg_scale=FALSE) {
   P <- X %*% t(X)
@@ -84,7 +87,7 @@ procrustes2 <- function(X, Y) {
 }
 
 ## Get distance matrix
-getD <- function(Xlist, k=0, etype="proc") {
+getD <- function(Xlist, n, k=0, etype="proc") {
   m <- length(Xlist)
   if (k==0) {
     ind <- 1:n
@@ -214,21 +217,6 @@ doIso <- function(mds, mdsd=2, isod=1, doplot=F)
   return(df.iso)
 }
 
-## This is another slope change point algorithm called segmented that is not used in the paper 
-break_point_dection=function(D,k){
-  tmax <- nrow(D)
-  df.mds <- doMDS(D,doplot = F)
-  mds <- df.mds$mds
-  df.iso <- doIso(mds, mdsd=k)
-  x=1:tmax/tmax
-  y1=df.iso$iso
-  os1<-segmented(lm(y1~x),psi=c(0.2))
-  result=as.data.frame(matrix(0,1,3))
-  result[1,1:4]=c((os1$psi[1,2]-1.95*os1$psi[1,3])*tmax,(os1$psi[1,2])*tmax,(os1$psi[1,2]+1.95*os1$psi[1,3])*tmax,os1$psi[1,3]*tmax)
-  return(result)
-  ## this result returns you the confidence interval of point estimation and the standard deviation
-}
-
 
 ## Implementation of the 3rd step in Algorithm 2 by recasting it as a linear programming problem.
 ## This function will return the objective function value Sk in the paper for a given change point t 
@@ -272,195 +260,131 @@ linf_cp=function(t,y,cp){
 }
 
 
+linf_error=function(x){
+  obf=NULL
+  for (nk in 2:(tmax-1)) { ## find the point which minimize the obj func Sk, that is the change point 
+    obf[nk]=linf_cp(1:tmax,x,nk)[1]
+  }
+  ecp=min(which(obf==min(obf[-1])))
+  return( c((ecp-tstar)/tmax ,  ecp) )
+}
+
+test_statistic <- function(t, y) {
+  tmax <- length(t)
+  results_matrix <- matrix(NA, nrow = tmax, ncol = 4)
+  
+  for (nk in 2:(tmax - 1)) {
+    results_matrix[nk, ] <- linf_cp(t, y, nk)
+  }
+  
+  best_cp_index <- which.min(results_matrix[, 1])
+  
+  bl <- results_matrix[best_cp_index, 3]
+  br <- results_matrix[best_cp_index, 4]
+  
+  return(abs(bl - br))
+}
+
 
 #### fix n change m
-
 set.seed(2)
 df.mds=NULL
-n=800
-p <- 0.4
-q <- 0.3
-nmc=2000
-mm=c(16,24,32,40)
 
+# --- Parameters ---
+m <- tmax <- 16
+delta <- (1 - 0.1) / tmax
+tstar <- tmax / 2
+nmc <- 300
 
-pacman::p_load("doParallel")
-registerDoParallel(detectCores()-4)
+# --- Revised Parameters ---
+nn <- c(500, 1000, 1500) # Vector of n values to loop over
+p_val <- 0.4               # Fixed p value
 
-out <- foreach (mc = 1:nmc) %do% {
-  tmp1 <- tmp2 <- rep(0,length(mm))
-  for(i in 1:length(mm)){
-    m <- tmax <- mm[i]
-    delta <- (1-0.1)/tmax
-    tstar <- tmax/2
-    df <- doSim(n,tmax,delta,p,q,tstar,startpoint = 0.1)
-    df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x,2)$Xhat[,1,drop=F]))
-    D2 <- getD(df$Xhat) 
-    df.mds <- doMDS(D2,doplot = F)
-    mds <- df.mds$mds
-    df.iso <- doIso(mds, mdsd=1)
-    obf=NULL
-    for (nk in 2:(tmax-1)) { ## find the point which minimize the obj func Sk, that is the change point 
-      obf[nk]=linf_cp(1:tmax,df.iso$iso,nk)[1]
-    }
-    ecp=min(which(obf==min(obf[-1])))
-    tmp1[i]=(ecp-tstar)/tmax
-    bpd=break_point_dection(D2,1)
-    round_bpd=which(abs(bpd[1,2]-1:tmax)==min(abs(bpd[1,2]-1:tmax)))
-    tmp2[i]=(round_bpd-tstar)/tmax
-  }
-  list(tmp1, tmp2)
+# Used to create "dot-safe" names for list elements (e.g., q_0p5)
+safe_num <- function(x) {
+  gsub("\\.", "p", format(x, trim = TRUE, scientific = FALSE))
 }
 
-maehat1=Reduce('cbind', lapply(out, "[[", 1))
-#maehat2=Reduce('cbind', lapply(out, "[[", 2))
+plan(multisession)
+handlers(global = TRUE)
+handlers("progress")
 
-maehat1[1,]
+# --- Pre-Loop Setup (since p is fixed) ---
+cat(paste("\n##########################################\n"))
+cat(paste("### Preparing simulations for fixed p =", p_val, "###\n"))
+cat(paste("##########################################\n"))
 
-sm_mae1=as.data.frame(matrix(0,length(mm),4))
-sm_mae1[,2]=apply(abs(maehat1), 1, mean)
-sm_mae1[,1]=apply(abs(maehat1), 1, mean)-apply(abs(maehat1), 1, sd)*1.96/sqrt(nmc)  
-sm_mae1[,3]=apply(abs(maehat1), 1, mean)+apply(abs(maehat1), 1, sd)*1.96/sqrt(nmc) 
-sm_mae1
+# 1. Generate the dynamic qq grid once
+qq <- seq(0.2,0.6,by=0.01)
+cat(paste("--- Generated", length(qq), "q values for p =", p_val, "---\n"))
 
-msehat1=maehat1^2
-sm_mse1=as.data.frame(matrix(0,length(mm),4))
-sm_mse1[,2]=apply(msehat1, 1, mean)
-sm_mse1[,1]=apply(msehat1, 1, mean)-apply(msehat1, 1, sd)*1.96/sqrt(nmc)  
-sm_mse1[,3]=apply(msehat1, 1, mean)+apply(msehat1, 1, sd)*1.96/sqrt(nmc) 
+# 1. Initialize the ONE BIG LIST before the loop
+all_n_results <- list()
 
-sm_mse1[,4]=mm
-plottt2<- ggplot(sm_mse_change_m, aes(x=V4, y=V2)) + 
-  geom_line() +geom_errorbar(aes(ymin=V1, ymax=V3))+
-  ylim(0,0.0115)+
-  scale_x_continuous(breaks = mm)+labs(y='',x='m')+
-  theme(axis.text=element_text(size=25),axis.title=element_text(size=25,face="bold"))
-print(plottt2)
-
-
-###############   fix m change n 
-set.seed(3)
-df.mds=NULL
-tmax <- m <- 12
-p <- 0.4
-q <- 0.3
-delta <- (1-0.1)/tmax
-tstar <- tmax/2
-nmc=2000
-nn=c(200,800,1600)
-msehat1=msehat2=matrix(0,length(nn),nmc)
-
-pacman::p_load("doParallel")
-registerDoParallel(detectCores()-4)
-
-
-out=foreach (mc=1:nmc) %do% {
-  tmp1 <- tmp2 <- rep(0,length(nn))
-  for(i in 1:length(nn)){
-    n=nn[i]
-    df <- doSim(nn[i],tmax,delta,p,q,tstar,startpoint = 0.1)
-    df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x,2)$Xhat[,1,drop=F]))
-    D2 <- getD(df$Xhat) 
-    df.mds <- doMDS(D2,doplot = F)
-    mds <- df.mds$mds
-    df.iso <- doIso(mds, mdsd=1)
-    ## l-inf regression change point localization
-    obf=NULL
-    for (nk in 2:(tmax-1)) {
-      obf[nk]=linf_cp(1:tmax,df.iso$iso,nk)[1]
-    }
-    ecp=min(which(obf==min(obf[-1])))
-    tmp1[i]=(ecp-tstar)/tmax
-    ##the break point algorithm but i change it so that it only detect the change point that is one of the time point 
-    bpd=break_point_dection(D2,1)
-    round_bpd=which(abs(bpd[1,2]-1:tmax)==min(abs(bpd[1,2]-1:tmax)))
-    tmp2[i]=(round_bpd-tstar)/tmax
+# --- Main Simulation Loop (looping over n) ---
+for (n_val in nn) {
+  
+  cat(paste("\n==========================================\n"))
+  cat(paste("### Running for n =", n_val, "(p =", p_val, ") ###\n"))
+  cat(paste("==========================================\n\n"))
+  
+  # This list will hold all 'q' results for the *current* n_val
+  all_ts_results_for_this_n <- list()
+  
+  for (q_val in qq) {
+    
+    cat(paste("\n--- Running simulations for q =", q_val, "(n =", n_val, ", p =", p_val, ") ---\n"))
+    
+    with_progress({
+      prog <- progressor(steps = nmc)
+      
+      ts_list_for_q <- future_lapply(1:nmc, function(i) {
+        prog() # Update progress bar
+        n <- n_val
+        # Use n_val in the simulation call
+        df <- doSim(n_val, tmax, delta, p_val, q_val, tstar, startpoint = 0.1)
+        df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x, 2)$Xhat[, 1, drop = F]))
+        D2 <- getD(df$Xhat, n = n_val)
+        df.mds <- doMDS(D2, doplot = F)
+        mds <- df.mds$mds
+        
+        test_statistic(1:tmax, mds[, 1])
+        
+      }, future.seed = TRUE)
+    })
+    
+    # Add the unlisted results for this q to the list for the current n
+    all_ts_results_for_this_n[[paste0("q_", safe_num(q_val))]] <- unlist(ts_list_for_q)
   }
-  list(tmp1,tmp2)
-}
+  
+  # 2. Add the results for this n_val directly to the main list
+  # This removes the intermediate p_0p4 layer
+  all_n_results[[paste0("n_", n_val)]] <- all_ts_results_for_this_n
+  
+  cat(paste("\n--- Completed and stored results for n =", n_val, "---\n"))
 
-msehat1=Reduce('cbind', lapply(out, "[[", 1))
+} # End of the 'n_val' loop
 
-## summary matrix
-sm_mse1=as.data.frame(matrix(0,length(nn),4))
-sm_mse1[,2]=apply(abs(msehat1)^2, 1, mean)
-sm_mse1[,1]=apply(abs(msehat1)^2, 1, mean)-apply(abs(msehat1)^2, 1, sd)*1.96/sqrt(nmc)  
-sm_mse1[,3]=apply(abs(msehat1)^2, 1, mean)+apply(abs(msehat1)^2, 1, sd)*1.96/sqrt(nmc) 
-sm_mse1[,4]=nn
+plan(sequential) # Shut down parallel workers
 
-## make the figure in paper 
-plottt1<- ggplot(sm_mse_change_n, aes(x=V4, y=V2)) + 
-  geom_line() +geom_errorbar(aes(ymin=V1, ymax=V3))+
-  ylim(0,0.0115)+
-  scale_x_continuous(breaks = nn)+
-  labs(y='MSE',x='n')+
-  theme(axis.text=element_text(size=25),axis.title=element_text(size=25,face="bold"))
-print(plottt1)
+# --- Save Results (All at once) ---
 
+# Define a base filename that reflects this is a combined file
+base_file_name <- sprintf(
+  "all_n_varying_results_m%d_nmc%d_tstar%d_p%s.Rdata",
+  m, nmc, tstar, safe_num(p_val)
+)
 
+# Create a timestamped name for archiving
+finish_time <- format(Sys.time(), "%Y%m%d_%H%M%S")
+archived_file_name <- sub(
+  "\\.Rdata$", 
+  paste0("_finished_", finish_time, ".Rdata"), 
+  base_file_name
+)
 
+# 3. Save the ONE BIG LIST containing all results
+cat(paste("\nSaving all combined results to:", archived_file_name , "\n"))
+save(all_n_results, file = archived_file_name )
 
-
-############# fix m n change CMDS embedding d 
-set.seed(3)
-df.mds=NULL
-#n=800 best
-tmax <- m <- 12
-p <- 0.4
-q <- 0.3
-delta <- (1-0.1)/tmax
-tstar <- tmax/2
-#nmc = 150 best 
-nmc=2000
-n=800
-msehat1=msehat2=matrix(0,10,nmc)
-
-pacman::p_load("doParallel")
-registerDoParallel(detectCores()-4)
-
-tmp1=NULL
-msehat <- foreach (mc = 1:nmc, .combine='cbind') %do% {
-  df <- doSim(n,tmax,delta,p,q,tstar,startpoint = 0.1)
-  df <- df %>% mutate(Xhat = map(g, function(x) full.ase(x,2)$Xhat[,1,drop=F]))
-  D2 <- getD(df$Xhat) 
-  df.mds <- doMDS(D2,doplot = F)
-  mds <- df.mds$mds
-  for(dd in 1:10){
-    df.iso <- doIso(mds, mdsd=dd)
-    ## l-inf regression change point localization
-    obf=NULL
-    for (nk in 2:(tmax-1)) {
-      obf[nk]=linf_cp(1:tmax,df.iso$iso,nk)[1]
-    }
-    ecp=min(which(obf==min(obf[-1])))
-    tmp1[dd]=(ecp-tstar)/tmax
-  }
-  tmp1
-}
-
-msehat
-
-sm_mse=as.data.frame(matrix(0,10,4))
-sm_mse[,2]=apply(abs(msehat)^2, 1, mean)
-sm_mse[,1]=apply(abs(msehat)^2, 1, mean)-apply(abs(msehat)^2, 1, sd)*1.96/sqrt(nmc)  
-sm_mse[,3]=apply(abs(msehat)^2, 1, mean)+apply(abs(msehat)^2, 1, sd)*1.96/sqrt(nmc) 
-sm_mse[,4]=1:10
-
-sm_mse
-
-plottt1<- ggplot(sm_mse[1:5,], aes(x=V4, y=V2)) + 
-  geom_line() +geom_errorbar(aes(ymin=V1, ymax=V3))+
-  ylim(-0.0001,0.01)+
-  scale_x_continuous(breaks = sm_mse$V4)+labs(y=expression(paste('MSE(',frac(hat(t),m),')')),x='MDS embedding dimension d for the $(d \to 1)$-iso-mirror'
-                                              ,title=paste('p=',p,'q=',q, 't*=',tstar, 'm=',tmax,'n=',n),size=15  )+
-  theme(axis.text=element_text(size=15),axis.title=element_text(size=15,face="bold"))
-print(plottt1)
-
-
-
-
-
-
-
-
-
+cat("\n\nAll simulations for all n values complete and saved to one file.\n")
